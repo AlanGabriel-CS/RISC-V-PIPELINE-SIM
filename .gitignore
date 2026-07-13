@@ -1,0 +1,5 @@
+build/
+riscv_sim.exe
+riscv_sim
+sim.vvp
+*.hex
