@@ -1,0 +1,30 @@
+RISC-V SV core vs Spike comparison -- run this on the Mac
+============================================================
+
+Regenerated on Windows side (v2, after fixing two gen_program.py bugs --
+see batch/MANIFEST.txt for details):
+  seed = 100
+  n    = 15   (the new max -- data_mem headroom dropped from n<=23 to
+               n<=15 as part of the fix)
+
+Files already sitting in this folder (via the SMB share):
+  program.elf     <- Spike input (RV32I, ELF32, entry 0x80000000)
+  program.hex     <- what the SV core consumed (for reference only)
+  commit_log.txt  <- SV core's retirement trace, freshly generated from this exact program
+
+What to do on the Mac:
+
+1. cd into this directory on the mounted share:
+     cd /Volumes/riscv-sim/shared/spike
+
+2. Run Spike against program.elf:
+
+     spike -l --log-commits --isa=rv32i --instructions=2100 program.elf 2> spike_trace.log
+
+3. Run the comparison and save the report:
+
+     python3 compare_accuracy.py spike_trace.log commit_log.txt > comparison_result.txt 2>&1
+
+4. Ping me once comparison_result.txt lands -- expecting close to 100% now.
+
+Note: use the scripts in THIS folder (shared/spike/*.py), not the rtl/ copies.
