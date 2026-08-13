@@ -1,0 +1,65 @@
+Batch 2 -- wider/larger random programs, generated on the PC side
+====================================================================
+
+Goal: exercise sizes and control-flow shapes batch 1 never touched.
+Batch 1 (batch/) topped out at n=15 because data_mem was only 256B and
+had to hold the whole program plus its load/store scratch region.
+data_mem.sv is now 4KB (1024 words, matches instruction_mem), so
+gen_program.py's own size-check formula allows n up into the hundreds.
+gen_program.py also now interleaves real bounded loops (init counter in
+x30, random body, decrement, backward branch -- see random_loop_block()
+in gen_program.py) into the random stream, so the loop buffer's replay
+path gets exercised by something other than the hand-written directed
+tests for the first time.
+
+seed    n(requested)  words  est._retire  dir
+50001   50            82     ~161         n50_seed50001
+50002   50            82     ~189         n50_seed50002
+150001  150           182    ~416         n150_seed150001
+150002  150           182    ~473         n150_seed150002
+150003  150           182    ~448         n150_seed150003
+400003  400           432    ~1056        n400_seed400003
+400004  400           432    ~1024        n400_seed400004
+400009  400           432    ~1168        n400_seed400009
+
+Each dir has program.elf (Spike input), program.hex (what the SV core
+consumed), and commit_log.txt (the SV core's retirement trace, already
+generated on this side -- Mac just needs to run Spike and compare).
+
+est._retire is a generation-time estimate (preamble + analytical loop
+counts), not necessarily exact -- see build_full_program()'s docstring.
+The actual SV-side retirement count you'll see in each commit_log.txt is
+higher: the testbench runs a fixed 20000-retirement budget and the
+program's real content finishes well before that, so it spends the rest
+re-retiring the same repeating epilogue instruction. compare_accuracy.py
+already truncates that repeated tail on both sides.
+
+What did NOT make it into this batch, and why (found during PC-side
+validation before anything was sent over -- worth knowing about):
+
+- Two real bugs in gen_program.py's random control-flow generation, found
+  by running candidate programs through Icarus locally and checking they
+  actually settle into the epilogue instead of hanging:
+    1. JAL is unconditional -- a randomly-chosen backward JAL with nothing
+       along the way able to conditionally escape formed a guaranteed,
+       permanent 2-instruction deadlock the moment it was reached.
+    2. A backward conditional branch whose comparison happened to keep
+       evaluating "taken" for many consecutive visits (pure bad luck with
+       which registers got compared, not a logic bug) formed the same
+       kind of accidental infinite loop. This got common enough at
+       n=400 that most naive attempts hung.
+  Fix: JAL and top-level branches are now forward-only. Backward branches
+  are still real and tested -- every random_loop_block's own bne is a
+  genuine backward branch, just a provably-terminating one (decrementing
+  counter, body instructions can't touch it).
+
+- n=700 (and likely other sizes with many loop blocks packed in): every
+  attempt (12/12) ended in PC going to 'x' -- not a hang, actual
+  X-propagation -- well before the program's own expected retirement
+  count. Not yet root-caused. Prime suspect given what's different at
+  that density: many backward-taken predictions (one per loop block, and
+  n=700 generates on the order of 15-20 of them) sharing branch_predictor's
+  64-entry, direct-mapped BTB, feeding loop_buffer's single-loop-context
+  FSM. Flagged as follow-up work, not fixed here -- didn't want to rush a
+  change to loop_buffer/branch_predictor interaction without room to
+  actually verify it.
