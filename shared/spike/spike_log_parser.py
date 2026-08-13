@@ -45,6 +45,18 @@ MEM_RE = re.compile(
     r"core\s+\d+:\s+\d+\s+0x([0-9a-fA-F]+)\s+\(0x([0-9a-fA-F]+)\)\s+mem\s+0x([0-9a-fA-F]+)\s+0x([0-9a-fA-F]+)"
 )
 
+# Load's commit line: address only, no value -- confirmed against real
+# batch2 output ("... mem 0x800002fc" with nothing after it). A read has
+# nothing written to log, so this is address-only where MEM_RE above is
+# address+value (a write). Recognized and discarded, not correlated into
+# a record's "mem" field: neither side of this comparison tracks load
+# addresses (tb_commit_log.sv only logs MEM lines for ex_mem_r.mem_write,
+# i.e. stores), so there's nothing on the SV side to correlate it against
+# -- this exists purely to stop it from showing up as unparsed noise.
+MEM_READ_RE = re.compile(
+    r"core\s+\d+:\s+\d+\s+0x([0-9a-fA-F]+)\s+\(0x([0-9a-fA-F]+)\)\s+mem\s+0x([0-9a-fA-F]+)\s*$"
+)
+
 # "Bare" commit line: an instruction that writes neither a register nor
 # memory (e.g. jr, or a branch) still gets a --log-commits line, just with
 # nothing after the instruction word. Carries
@@ -96,6 +108,10 @@ def parse_spike_log(path, entry_addr=0x80000000):
                 val = int(m_mem.group(4), 16) & 0xFFFFFFFF
                 mem_by_line_context.setdefault((pc, instr), []).append((addr, val))
                 continue
+
+            m_mem_read = MEM_READ_RE.search(line)
+            if m_mem_read:
+                continue  # load's address-only commit line -- see MEM_READ_RE's docstring
 
             m_bare = BARE_COMMIT_RE.search(line)
             if m_bare:
