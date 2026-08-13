@@ -205,10 +205,25 @@ def _gen_one_instr(rng, written_offsets, allow_branch_jal=True, pos=None, total=
         # JAL at the end looped forever, since nothing in the span could
         # ever escape it). Backward control flow that needs a real exit
         # condition is exactly what BRANCH and random_loop_block are for.
+        #
+        # rd is forced to x0, not random -- found by testing at larger n:
+        # the SV core boots from PC=0 while Spike loads the same bytes at
+        # 0x80000000, so a JAL's return address (pc+4) is a small value on
+        # one side and a ~0x8000xxxx value on the other. That's fine and
+        # expected for the two simulators' own internal execution, but if a
+        # LATER random instruction picks that register as an operand to
+        # anything sign-sensitive (SRA, SLT, BLT, BGE), the two simulators
+        # legitimately compute different results -- not an RTL bug, a
+        # comparison-methodology hazard from the base-address difference.
+        # x0 discards the return address entirely (same convention as
+        # RISC-V's "j" pseudo-op for an unconditional jump with no link),
+        # which is all this generator ever needed from JAL -- it's testing
+        # the squash-on-taken control-flow path, not real call/return
+        # linkage.
         max_span = min(8, total - 1 - pos) or 1
         candidates = [d for d in range(1, max_span + 1) if not _in_any_range(pos + d, loop_ranges)]
         delta_words = rng.choice(candidates or list(range(1, max_span + 1)))
-        return enc_j(0x6F, _reg(rng), delta_words * 4)
+        return enc_j(0x6F, 0, delta_words * 4)
 
 
 def random_loop_block(rng, written_offsets, budget_words):
@@ -306,9 +321,32 @@ def random_program(rng: random.Random, n: int):
     # stub. auipc x31,0 makes x31 = this instruction's own address on
     # each side; data_offset (now well past the whole program) lands each
     # side in its own valid, non-code-overlapping region.
-    instrs[0] = enc_u(0x17, 31, 0)               # auipc x31, 0
+    # data_offset can exceed +-2047 well before it exceeds data_mem's total
+    # size (e.g. n=700 gives data_offset=2836) -- a single addi can't carry
+    # that, its immediate is a signed 12-bit field. Encoding data_offset
+    # into it directly silently truncates and sign-flips (2836 -> -1260),
+    # landing x31 at a wildly wrong address -- every load/store through it
+    # then computes an out-of-range index, which Icarus correctly returns
+    # as 'x' for. Found by testing at n=700: this is what actually produced
+    # the X-propagation, not a branch-predictor/loop-buffer interaction as
+    # first suspected.
+    #
+    # Fix: the standard RISC-V auipc+addi hi20/lo12 split (same technique
+    # real toolchains use for %pcrel_hi/%pcrel_lo) -- auipc's own 20-bit
+    # immediate carries the bulk of the offset (shifted left 12), addi
+    # carries only the remainder, which by construction always fits in
+    # +-2047. The "if lo12's sign bit would flip it negative, bump hi20 by
+    # one to compensate" step is what makes hi20*4096 + sign_extend(lo12)
+    # reconstruct data_offset exactly, for any magnitude.
+    lo12 = data_offset & 0xFFF
+    hi20 = data_offset >> 12
+    if lo12 & 0x800:
+        lo12 -= 0x1000
+        hi20 += 1
+
+    instrs[0] = enc_u(0x17, 31, hi20)            # auipc x31, hi20
     if n > 1:
-        instrs[1] = enc_i(0x13, 0x0, 31, 31, data_offset)  # addi x31,x31,data_offset
+        instrs[1] = enc_i(0x13, 0x0, 31, 31, lo12)  # addi x31,x31,lo12
     start = 2 if n > 1 else 1
 
     written_offsets = set()  # offsets (relative to x31) this program has stored to so far
