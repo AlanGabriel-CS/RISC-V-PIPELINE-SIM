@@ -21,6 +21,13 @@ seed    n(requested)  words  est._retire  dir
 400003  400           432    ~1056        n400_seed400003
 400004  400           432    ~1024        n400_seed400004
 400009  400           432    ~1168        n400_seed400009
+700101  700            732   ~1994        n700_seed700101
+700102  700            732   ~2038        n700_seed700102
+
+Round 2's 8 programs (n50/n150/n400) all came back 100% from Spike --
+see ROUND 2 below. n700_seed700101/700102 are new in round 3, added
+after fixing what round 2 had left open (see ROUND 3 below) -- these
+haven't been Spike-compared yet, only locally settle-checked.
 
 Each dir has program.elf (Spike input), program.hex (what the SV core
 consumed), and commit_log.txt (the SV core's retirement trace, already
@@ -95,19 +102,60 @@ back through the raw commit logs on both sides:
 
 All 8 programs in this dir were regenerated after both round-2 fixes and
 re-validated locally (settles cleanly into the epilogue, zero X's) before
-being sent back to the Mac for a second real comparison.
+being sent back to the Mac for a second real comparison. Result: all 8
+came back 100.00% -- n50 x2, n150 x3, n400 x3, no warnings.
 
-STILL OPEN, found while chasing n=700 a second time after the auipc/addi
-fix (X-propagation was gone, but it still didn't finish in 20000
-retirements): one specific loop_buffer replay looked consistently
-one-slot-behind where it should be, starting exactly on the iteration a
-loop's trip counter hits zero (the exit iteration) -- e.g. the decrement
-instruction's own commit line showed a register write that belongs to
-the *previous* body instruction instead. Strong suspicion, not proven:
-an interaction between STATE_LOOPING's replay and the misprediction
-flush that should fire when the trained-taken BTB entry predicts one more
-iteration than the loop actually has left. n=700 is deliberately left
-out of this batch because of this -- it's a real, pre-existing RTL
-question in loop_buffer.sv itself (not touched this session, not a
-gen_program.py issue), and diagnosing it properly needs a waveform, not
-more log-reading. Follow-up work, not fixed here.
+ROUND 3 -- went back for n=700, which round 2 had left out with a
+"looked one-slot-behind, needs a waveform" note. Built a scratch
+testbench (tb_debug_loopbuf.sv, not committed -- lives in the session's
+scratchpad, dumps loop_buffer's internal state every cycle) to actually
+watch it happen instead of inferring from the commit log. Two real bugs,
+both now fixed and both with regression coverage:
+
+  1. RTL bug in loop_buffer.sv (STATE_RECORDING): write_ptr_q advanced
+     and captured instruction_in every clock cycle, with no check for
+     whether IF actually fetched something new that cycle. A load-use
+     hazard inside a loop body freezes if_pc for one extra cycle (the
+     pipeline's own correct 1-cycle stall) -- during RECORDING, that
+     extra cycle got captured as if it were a new instruction, shifting
+     every instruction recorded after it by one buffer slot. By the time
+     replay reached the loop's own branch, it silently played back the
+     decrement instead -- so on the exit iteration, the branch never
+     actually got re-evaluated with the right instruction, the counter
+     blew through zero, and the loop ran forever. Confirmed by watching
+     write_ptr_q hold steady during the stalled cycle instead of
+     advancing, then tracing the exact same buffer slot forward to see
+     it hand back the wrong bytes at replay time.
+     Fix: loop_buffer gained a `stall` input (wired from the same signal
+     that already gates pc_write); STATE_RECORDING now holds write_ptr_q
+     and skips the buffer write on a stall cycle instead of advancing
+     through it. New regression test: rtl/tb_loop_buffer_stall.sv (a
+     load immediately consumed by the next instruction, inside a
+     counting loop) -- confirmed it fails against the pre-fix RTL
+     (x1 landed on 17 instead of 5) and passes with the fix.
+
+  2. Second, unrelated bug this surfaced -- in gen_program.py, not the
+     RTL. The forward-only exclusion added in round 1 (so a top-level
+     JAL/branch can never target inside a loop block) had an unsafe
+     fallback: `candidates or list(range(1, max_span+1))` for JAL, and
+     `candidates or [1]` for branch. When two loop blocks land
+     back-to-back and together cover the whole +-8-word forward window,
+     `candidates` comes back empty -- and both fallbacks silently
+     discarded the exclusion and picked an unsafe target anyway,
+     reintroducing the exact deadlock the exclusion exists to prevent.
+     Caught directly: at n=700 seed=700101, a JAL at word 582 had zero
+     safe candidates (two adjacent loop ranges covered words 583-592
+     entirely) and picked delta=2 anyway, landing squarely inside the
+     second loop block and permanently corrupting it.
+     Fix: no more unsafe fallback -- when there's nowhere safe to jump,
+     emit a plain R-type instruction instead (always safe, no address
+     dependency, costs nothing real for a single random slot).
+
+Re-validated after both fixes: 10/10 clean settles across fresh seeds at
+n=700 through n=950 (previously: 3/10 at the same sizes with only the
+RTL fix, 0/10 before either fix). Full RTL regression suite (7 directed
+testbenches, including the new one) still all-PASS.
+
+n700_seed700101/700102 in this dir were generated with both fixes in
+place and locally settle cleanly (zero X's, single steady-state PC) --
+not yet Spike-compared. That's the next real check.
