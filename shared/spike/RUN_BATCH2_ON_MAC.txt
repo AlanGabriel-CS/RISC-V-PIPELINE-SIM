@@ -1,17 +1,17 @@
-Batch 2 comparison, ROUND 3 -- run this on the Mac
-===================================================
+Batch 2 comparison -- run this on the Mac
+=========================================
 
-Round 2 already came back 100.00% on all 8 n50/n150/n400 programs --
-that's confirmed, nothing to redo there. What's new in round 3: two more
-programs, n700_seed700101 and n700_seed700102. n=700 was the one left
-out of every earlier round (round 1: X-propagation; round 2: still
-wouldn't finish, flagged as needing a waveform). That's now root-caused
-and fixed -- a real RTL bug in loop_buffer.sv plus a second, unrelated
-bug in gen_program.py's own safety fallback. Full story in
-batch2/MANIFEST2.txt's "ROUND 3" section.
+The 8 n50/n150/n400 programs already came back 100.00% last time --
+that's confirmed, nothing to redo there. What's new: two more programs,
+n700_seed700101 and n700_seed700102. n=700 was the size that kept
+breaking every previous attempt (first it was X-propagation, then it
+just wouldn't finish and I couldn't tell why without a waveform). Finally
+tracked it down -- a real RTL bug in loop_buffer.sv, plus a second,
+unrelated bug in gen_program.py's own safety fallback that I found while
+chasing the first one. Full story in batch2/MANIFEST2.txt.
 
-Same loop as before, just re-run it -- the n50/n150/n400 dirs will just
-re-confirm what round 2 already showed, and the two new n700 dirs are
+Just re-run the same loop as before -- the n50/n150/n400 dirs will just
+re-confirm what already came back clean, and the two new n700 dirs are
 where the real new information is:
 
   cd /Volumes/riscv-sim/shared/spike

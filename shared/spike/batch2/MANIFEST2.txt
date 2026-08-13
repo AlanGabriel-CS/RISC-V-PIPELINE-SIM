@@ -1,16 +1,16 @@
 Batch 2 -- wider/larger random programs, generated on the PC side
 ====================================================================
 
-Goal: exercise sizes and control-flow shapes batch 1 never touched.
-Batch 1 (batch/) topped out at n=15 because data_mem was only 256B and
-had to hold the whole program plus its load/store scratch region.
-data_mem.sv is now 4KB (1024 words, matches instruction_mem), so
-gen_program.py's own size-check formula allows n up into the hundreds.
-gen_program.py also now interleaves real bounded loops (init counter in
-x30, random body, decrement, backward branch -- see random_loop_block()
-in gen_program.py) into the random stream, so the loop buffer's replay
-path gets exercised by something other than the hand-written directed
-tests for the first time.
+Goal here was to actually exercise sizes and control-flow shapes batch 1
+never touched. Batch 1 (batch/) topped out at n=15 because data_mem was
+only 256B and had to hold the whole program plus its load/store scratch
+region. Bumped data_mem.sv to 4KB (1024 words, matches instruction_mem),
+so gen_program.py's own size-check formula allows n up into the
+hundreds now. Also added real bounded loops to the generator (init
+counter in x30, random body, decrement, backward branch -- see
+random_loop_block() in gen_program.py), interleaved into the random
+stream, so the loop buffer's replay path finally gets exercised by
+something other than the hand-written directed tests.
 
 seed    n(requested)  words  est._retire  dir
 50001   50            82     ~161         n50_seed50001
@@ -24,10 +24,10 @@ seed    n(requested)  words  est._retire  dir
 700101  700            732   ~1994        n700_seed700101
 700102  700            732   ~2038        n700_seed700102
 
-Round 2's 8 programs (n50/n150/n400) all came back 100% from Spike --
-see ROUND 2 below. n700_seed700101/700102 are new in round 3, added
-after fixing what round 2 had left open (see ROUND 3 below) -- these
-haven't been Spike-compared yet, only locally settle-checked.
+The n50/n150/n400 ones already came back 100% from Spike (see the
+timeline below). n700_seed700101/700102 are new, added after fixing what
+was still broken at that size -- haven't sent these to Spike yet, only
+checked locally that they settle.
 
 Each dir has program.elf (Spike input), program.hex (what the SV core
 consumed), and commit_log.txt (the SV core's retirement trace, already
@@ -35,127 +35,123 @@ generated on this side -- Mac just needs to run Spike and compare).
 
 est._retire is a generation-time estimate (preamble + analytical loop
 counts), not necessarily exact -- see build_full_program()'s docstring.
-The actual SV-side retirement count you'll see in each commit_log.txt is
-higher: the testbench runs a fixed 20000-retirement budget and the
-program's real content finishes well before that, so it spends the rest
-re-retiring the same repeating epilogue instruction. compare_accuracy.py
+The actual SV-side retirement count in each commit_log.txt is higher:
+the testbench runs a fixed 20000-retirement budget and the program's
+real content finishes well before that, so it spends the rest
+re-retiring the repeating epilogue instruction. compare_accuracy.py
 already truncates that repeated tail on both sides.
 
-Revision history on this batch (round 1 was sent, actually compared
-against Spike, and came back with real problems -- this section is the
-honest trail, not just the final state):
+How this batch actually went (keeping this honest instead of just
+writing up the final state -- it took three passes to get here):
 
-ROUND 1 -- two bugs found in gen_program.py before anything was sent
-(caught locally: candidate programs run through Icarus and checked for
-whether they actually settle into the epilogue instead of hanging):
-  1. JAL is unconditional -- a randomly-chosen backward JAL with nothing
-     along the way able to conditionally escape formed a guaranteed,
-     permanent 2-instruction deadlock the moment it was reached.
-  2. A backward conditional branch whose comparison happened to keep
-     evaluating "taken" for many consecutive visits (pure bad luck with
-     which registers got compared, not a logic bug) formed the same kind
-     of accidental infinite loop -- common enough at n=400 that most
-     naive attempts hung.
-  Fix: JAL and top-level branches are now forward-only. Backward branches
-  are still real and tested -- every random_loop_block's own bne is a
-  genuine backward branch, provably terminating by construction
-  (decrementing counter, body instructions can't touch it).
-  n=700 was attempted in this round too: every try (12/12) ended in PC
-  going to 'x' (X-propagation, not a hang). Left out of round 1, flagged
-  as unexplained.
+First pass, before sending anything anywhere: found two bugs in
+gen_program.py just by running candidate programs through Icarus locally
+and checking whether they actually settle into the epilogue instead of
+hanging forever. JAL is unconditional, and a randomly-chosen backward JAL
+with nothing along the way able to conditionally escape turned into a
+guaranteed, permanent 2-instruction deadlock the moment it got reached.
+A backward conditional branch had the same problem in a sneakier form --
+if its comparison happened to keep evaluating "taken" for a long run
+(pure bad luck in which registers got compared, not a logic bug), that's
+an accidental infinite loop too, and it got common enough at n=400 that
+most naive attempts just hung. Fixed both by making JAL and top-level
+branches forward-only -- backward branches are still real and tested,
+random_loop_block's own bne is a genuine backward branch, just provably
+terminating by construction (decrementing counter, body can't touch it).
+Tried n=700 in this pass too: every attempt, 12 for 12, ended in PC going
+to 'x'. Left it out, no idea why yet.
 
-ROUND 2 -- round 1's 8 programs were actually run against Spike on the
-Mac. Results: n50 x2 = 100%, but n150/n400 ranged 37%-99.5%, mostly bad.
-Root cause, found by tracing the first divergence in each failing case
-back through the raw commit logs on both sides:
-  JAL's return address (pc+4) is base-address-dependent -- the SV core
-  boots from PC=0, Spike loads the same bytes at 0x80000000, so the SAME
-  JAL produces a small value on one side and a ~0x8000xxxx value on the
-  other. That's fine for each simulator's own execution, but once a LATER
-  random instruction picked that register as an operand to anything
-  sign-sensitive (SRA, SLT, BLT, BGE), the two simulators legitimately
-  computed different results, or took different branch directions
-  entirely -- not an RTL bug, a comparison-methodology hazard from the
-  base-address split. Confirmed directly: n150_seed150003's first
-  mismatch was `srai x2,x5,1` where x5 held a JAL return address --
-  Spike's x5=0x8000008c (sign bit set, arithmetic shift sign-extends),
-  SV's x5=0x8c (sign bit clear, doesn't) -- both computed *correctly*
-  from their own x5.
-  Fix: JAL's rd is now forced to x0. This generator only ever needed JAL
-  for its squash-on-taken control-flow behavior, never real call/return
-  linkage, so discarding the return address (same convention as RISC-V's
-  "j" pseudo-op) costs nothing and removes the hazard at its source.
+Second pass: the 8 n50/n150/n400 programs from the first pass actually
+went to the Mac and got compared against Spike for real. n50 came back
+100%, but n150/n400 were all over the place, 37% up to 99.5%. Traced the
+first divergence in a failing case back through the raw logs on both
+sides and found it: JAL's return address (pc+4) is base-address-
+dependent, because the SV core boots from PC=0 while Spike loads the
+same bytes at 0x80000000. Same JAL, small value on one side, a
+0x8000xxxx value on the other -- totally fine for each simulator's own
+execution, right up until a later random instruction picks that register
+as an operand to something sign-sensitive (SRA, SLT, BLT, BGE), and then
+the two simulators legitimately compute different answers or take
+different branches. Not an RTL bug at all, just a hazard in how the
+comparison itself is set up. Saw it directly: n150_seed150003's first
+mismatch was `srai x2,x5,1` where x5 held a JAL return address -- Spike's
+x5=0x8000008c (sign bit set, so the arithmetic shift sign-extends), SV's
+x5=0x8c (sign bit clear, so it doesn't) -- both sides computed correctly
+from their own x5, they just didn't have the same x5. Fixed by forcing
+JAL's rd to x0 -- this generator never needed real call/return linkage
+out of JAL, only its squash-on-taken behavior, so throwing away the
+return address costs nothing.
 
-  Also root-caused n=700's X-propagation while in there (the "BTB
-  aliasing/loop_buffer density" guess from round 1 was wrong -- didn't
-  even need to touch loop_buffer): `data_offset` (how far past the
-  program's own end x31's data region sits) grows with n, and at n=700 it
-  reached 2836 -- past what a single addi's signed 12-bit immediate
-  (+-2047) can hold. Encoding it directly silently truncated and
-  sign-flipped it (2836 -> -1260), landing x31 at a wildly wrong address;
-  every load/store through it then indexed data_mem out of bounds, which
-  Icarus correctly returns 'x' for. Fix: the standard RISC-V auipc+addi
-  hi20/lo12 split (same technique real toolchains use for
-  %pcrel_hi/%pcrel_lo) -- auipc's own 20-bit immediate now carries the
-  bulk of the offset, addi only the remainder, which by construction
-  always fits in +-2047 regardless of program size.
+While I was in there I also finally figured out n=700's X-propagation
+from the first pass. My first guess (something about BTB aliasing and
+loop_buffer density) was wrong, didn't even need to touch loop_buffer.
+Actual cause: data_offset (how far past the program's own end the data
+region sits) grows with n, and at n=700 it hits 2836 -- past what a
+single addi's signed 12-bit immediate (+-2047) can hold. Encoding it
+directly just silently truncated and sign-flipped it (2836 -> -1260),
+so x31 ended up pointing somewhere completely wrong, and every load/store
+through it indexed data_mem out of bounds -- which Icarus correctly
+returns 'x' for. Fixed it with the standard auipc+addi hi20/lo12 split
+(same trick real toolchains use for %pcrel_hi/%pcrel_lo) -- auipc's own
+20-bit immediate carries the bulk of the offset now, addi only ever has
+to carry the remainder, which by construction always fits.
 
-All 8 programs in this dir were regenerated after both round-2 fixes and
-re-validated locally (settles cleanly into the epilogue, zero X's) before
-being sent back to the Mac for a second real comparison. Result: all 8
-came back 100.00% -- n50 x2, n150 x3, n400 x3, no warnings.
+Regenerated all 8 programs after both fixes, checked locally that they
+settle clean with zero X's, sent them back to the Mac. Came back
+100.00% across the board -- n50 x2, n150 x3, n400 x3, no warnings.
 
-ROUND 3 -- went back for n=700, which round 2 had left out with a
-"looked one-slot-behind, needs a waveform" note. Built a scratch
-testbench (tb_debug_loopbuf.sv, not committed -- lives in the session's
-scratchpad, dumps loop_buffer's internal state every cycle) to actually
-watch it happen instead of inferring from the commit log. Two real bugs,
-both now fixed and both with regression coverage:
+Third pass was going back for n=700, which I'd left out with a "looked
+one-slot-behind, needs a waveform" note. Wrote a scratch debug
+testbench (not committed, lives in the session's scratchpad) that dumps
+loop_buffer's internal state every cycle, so I could actually watch it
+happen instead of guessing from the commit log. Turned out to be two
+separate bugs.
 
-  1. RTL bug in loop_buffer.sv (STATE_RECORDING): write_ptr_q advanced
-     and captured instruction_in every clock cycle, with no check for
-     whether IF actually fetched something new that cycle. A load-use
-     hazard inside a loop body freezes if_pc for one extra cycle (the
-     pipeline's own correct 1-cycle stall) -- during RECORDING, that
-     extra cycle got captured as if it were a new instruction, shifting
-     every instruction recorded after it by one buffer slot. By the time
-     replay reached the loop's own branch, it silently played back the
-     decrement instead -- so on the exit iteration, the branch never
-     actually got re-evaluated with the right instruction, the counter
-     blew through zero, and the loop ran forever. Confirmed by watching
-     write_ptr_q hold steady during the stalled cycle instead of
-     advancing, then tracing the exact same buffer slot forward to see
-     it hand back the wrong bytes at replay time.
-     Fix: loop_buffer gained a `stall` input (wired from the same signal
-     that already gates pc_write); STATE_RECORDING now holds write_ptr_q
-     and skips the buffer write on a stall cycle instead of advancing
-     through it. New regression test: rtl/tb_loop_buffer_stall.sv (a
-     load immediately consumed by the next instruction, inside a
-     counting loop) -- confirmed it fails against the pre-fix RTL
-     (x1 landed on 17 instead of 5) and passes with the fix.
+The real one is in loop_buffer.sv itself: STATE_RECORDING advanced
+write_ptr_q and captured instruction_in every single clock cycle, with
+no check for whether IF actually fetched something new that cycle. A
+load-use hazard inside a loop body freezes if_pc for one extra cycle --
+that's the pipeline's own correct 1-cycle stall, nothing wrong with it
+on its own -- but during RECORDING that extra cycle got captured as if
+it were a brand new instruction, which shifts everything recorded after
+it by one buffer slot. By the time replay got to the loop's own branch,
+it was quietly handing back the decrement instead. So on the exit
+iteration the branch never actually got evaluated with the right
+instruction, the counter blew straight through zero, and the loop just
+ran forever. Watched it happen directly: write_ptr_q holding steady
+during the stalled cycle instead of advancing, then followed that same
+buffer slot forward to see it hand back the wrong bytes at replay time.
+Fixed it by giving loop_buffer a `stall` input (same signal that already
+gates pc_write) and having STATE_RECORDING hold write_ptr_q and skip the
+buffer write on a stall cycle instead of plowing through it. Added
+rtl/tb_loop_buffer_stall.sv as a regression test -- a load immediately
+consumed by the next instruction, inside a counting loop -- and checked
+it actually fails against the old RTL first (x1 landed on 17 instead of
+5) before trusting that it passes for the right reason with the fix.
 
-  2. Second, unrelated bug this surfaced -- in gen_program.py, not the
-     RTL. The forward-only exclusion added in round 1 (so a top-level
-     JAL/branch can never target inside a loop block) had an unsafe
-     fallback: `candidates or list(range(1, max_span+1))` for JAL, and
-     `candidates or [1]` for branch. When two loop blocks land
-     back-to-back and together cover the whole +-8-word forward window,
-     `candidates` comes back empty -- and both fallbacks silently
-     discarded the exclusion and picked an unsafe target anyway,
-     reintroducing the exact deadlock the exclusion exists to prevent.
-     Caught directly: at n=700 seed=700101, a JAL at word 582 had zero
-     safe candidates (two adjacent loop ranges covered words 583-592
-     entirely) and picked delta=2 anyway, landing squarely inside the
-     second loop block and permanently corrupting it.
-     Fix: no more unsafe fallback -- when there's nowhere safe to jump,
-     emit a plain R-type instruction instead (always safe, no address
-     dependency, costs nothing real for a single random slot).
+Second bug, unrelated, and it's mine, in gen_program.py this time: the
+forward-only exclusion from the first pass (so a JAL/branch can never
+target inside a loop block) had a fallback that wasn't actually safe --
+`candidates or list(range(1, max_span+1))` for JAL, `candidates or [1]`
+for branch. If two loop blocks happen to land back-to-back and together
+cover the whole +-8-word forward window, candidates comes back empty,
+and both of those fallbacks just quietly threw the exclusion away and
+picked an unsafe target anyway -- putting right back the exact deadlock
+the exclusion was supposed to prevent. Caught it directly at
+seed=700101: a JAL at word 582 had zero safe candidates (two adjacent
+loop ranges covered words 583-592 completely) and picked delta=2 anyway,
+landing right inside the second loop and corrupting it. Fixed by not
+having an unsafe fallback at all -- if there's nowhere safe to jump, just
+emit a plain R-type instruction instead. Costs nothing, it's one random
+slot out of hundreds.
 
-Re-validated after both fixes: 10/10 clean settles across fresh seeds at
-n=700 through n=950 (previously: 3/10 at the same sizes with only the
-RTL fix, 0/10 before either fix). Full RTL regression suite (7 directed
-testbenches, including the new one) still all-PASS.
+Re-validated after both fixes: 10 for 10 clean settles across fresh
+seeds from n=700 to n=950 (was 3/10 with only the RTL fix, 0/10 before
+either fix -- so both were actually needed, neither one alone got there).
+Full regression suite still all-PASS, including the new test.
 
-n700_seed700101/700102 in this dir were generated with both fixes in
-place and locally settle cleanly (zero X's, single steady-state PC) --
-not yet Spike-compared. That's the next real check.
+n700_seed700101/700102 in this dir were generated with both fixes in and
+locally settle clean -- zero X's, single steady-state PC. Haven't sent
+them to Spike yet. That's the next real check, and it's the first time
+loop_buffer's fix gets tested against the actual golden model instead of
+just self-checked.
