@@ -1,11 +1,20 @@
-Batch 2 comparison -- run this on the Mac
-=========================================
+Batch 2 comparison, ROUND 2 -- run this on the Mac
+===================================================
 
-8 new test programs in batch2/<dir>/, sizes n=50/150/400 (see
-batch2/MANIFEST2.txt for what's in each and why -- also covers two real
-gen_program.py control-flow bugs found and fixed while putting this
-batch together, and one still-open finding at n=700 that deliberately
-did NOT make it into this batch).
+If you already ran round 1 of this batch: please run it again. Round 1
+came back 37%-99.5% on most of the 150/400-sized programs, root-caused
+to a real gen_program.py bug (JAL's return address is base-address-
+dependent between the two simulators -- see batch2/MANIFEST2.txt's
+"ROUND 2" section for the full trace). That's fixed now, and all 8
+programs in batch2/<dir>/ were regenerated and re-validated locally
+before landing here again -- this is fresh content, not the same bytes
+you compared before.
+
+8 test programs in batch2/<dir>/, sizes n=50/150/400 (see
+batch2/MANIFEST2.txt for the full revision history: two bugs found and
+fixed before round 1 even shipped, one more found and fixed after round
+1's real results came back, and one still-open RTL finding at n=700 that
+deliberately did NOT make it into this batch).
 
   cd /Volumes/riscv-sim/shared/spike
 
