@@ -1,0 +1,36 @@
+Batch 2 comparison -- run this on the Mac
+=========================================
+
+8 new test programs in batch2/<dir>/, sizes n=50/150/400 (see
+batch2/MANIFEST2.txt for what's in each and why -- also covers two real
+gen_program.py control-flow bugs found and fixed while putting this
+batch together, and one still-open finding at n=700 that deliberately
+did NOT make it into this batch).
+
+  cd /Volumes/riscv-sim/shared/spike
+
+  for d in batch2/*/; do
+    d=${d%/}
+    echo "=== $d ==="
+    spike -l --log-commits --isa=rv32i --instructions=5000 "$d/program.elf" 2> "$d/spike_trace.log"
+    python3 compare_accuracy.py "$d/spike_trace.log" "$d/commit_log.txt" > "$d/comparison_result.txt" 2>&1
+    grep ACCURACY "$d/comparison_result.txt"
+  done
+
+--instructions=5000 (vs. 2100 for batch 1) because these programs are
+bigger -- comfortably covers even the largest (n=400, ~1168 estimated
+real retirements) plus headroom, same idea as before: extra budget just
+means Spike sits in the repeated epilogue a bit longer, which
+compare_accuracy.py already truncates on both sides.
+
+Same note as before: use this folder's spike_log_parser.py /
+sv_log_parser.py / compare_accuracy.py, not the rtl/ copies (those were
+actually removed from the repo, since they'd drifted -- this folder's
+copies are now the only ones that exist).
+
+If anything comes back short of 100%, that's a genuinely new, real
+finding (unlike batch 1's two now-fixed address bugs) -- these programs
+were already validated on the PC side to run to completion cleanly (no
+X-propagation, settles into the epilogue) before being sent over, so a
+mismatch here would be an actual RTL-vs-ISA behavioral difference, not a
+generator artifact.
