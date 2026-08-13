@@ -109,6 +109,7 @@ module riscv_core (
         .predict_taken   (predict_taken_if),
         .predict_target  (predict_target_if),
         .flush           (flush),
+        .stall           (stall),
         .loop_active     (loop_active),
         .instruction_out (instr_if_final),
         .gate_icache_clk (gate_icache_clk)
