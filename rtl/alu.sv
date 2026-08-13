@@ -6,7 +6,7 @@ module alu (
     output logic        zero,
     output logic        negative,
     output logic        overflow
-); 
+);
     always_comb begin
         case (alu_control)
             4'b0000: alu_result = a + b;           // ADD
@@ -22,11 +22,10 @@ module alu (
             default: alu_result = 32'd0;
         endcase
     end
- 
+
     assign zero     = (alu_result == 32'd0);
-    assign negative = alu_result[31]; 
-    assign overflow = (alu_control == 4'b0001) ? 
+    assign negative = alu_result[31];
+    assign overflow = (alu_control == 4'b0001) ?
                       ((a[31] ^ b[31]) && (alu_result[31] != a[31])) : 1'b0;
- 
+
 endmodule
- 
