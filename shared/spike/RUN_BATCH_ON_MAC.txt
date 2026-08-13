@@ -1,0 +1,27 @@
+Batch comparison -- run this on the Mac
+=========================================
+
+Re-run after fixing a second gen_program.py bug (self-modifying code from
+stores landing on not-yet-executed instructions -- see batch/MANIFEST.txt).
+8 fresh test programs are in batch/<dir>/, all regenerated, all with new
+seed/n values (max n dropped from 23 to 15). Old batch results were
+deleted, not just overwritten, so there's nothing stale left to confuse
+this run.
+
+  cd /Volumes/riscv-sim/shared/spike
+
+  for d in batch/*/; do
+    d=${d%/}
+    echo "=== $d ==="
+    spike -l --log-commits --isa=rv32i --instructions=2100 "$d/program.elf" 2> "$d/spike_trace.log"
+    python3 compare_accuracy.py "$d/spike_trace.log" "$d/commit_log.txt" > "$d/comparison_result.txt" 2>&1
+    grep ACCURACY "$d/comparison_result.txt"
+  done
+
+Expecting all 8 (plus the single run in RUN_ON_MAC.txt) to land at or very
+close to 100% now -- both known gen_program.py address bugs are fixed.
+Anything still short of 100% at this point would be a genuinely new/real
+finding worth flagging.
+
+Same note as before: use this folder's spike_log_parser.py / sv_log_parser.py,
+not the rtl/ copies.
