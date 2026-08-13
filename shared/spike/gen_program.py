@@ -195,7 +195,17 @@ def _gen_one_instr(rng, written_offsets, allow_branch_jal=True, pos=None, total=
         op, f3 = rng.choice(BRANCHES)
         max_span = min(8, total - 1 - pos) or 1
         candidates = [d for d in range(1, max_span + 1) if not _in_any_range(pos + d, loop_ranges)]
-        delta_words = rng.choice(candidates or [1])
+        if not candidates:
+            # Same reasoning as JAL's identical guard above -- `candidates
+            # or [1]` here would blindly target pos+1 even when that's
+            # inside an excluded loop block. A not-taken branch always
+            # falls through safely regardless (that's just pos+1, no
+            # encoding involved), but a *taken* one landing inside a loop
+            # block risks disrupting its RECORDING capture -- not worth
+            # the risk for a single random instruction slot.
+            op2, f3b, f7 = rng.choice(R_TYPE)
+            return enc_r(op2, f3b, f7, _reg(rng), _reg(rng), _reg(rng))
+        delta_words = rng.choice(candidates)
         return enc_b(op, f3, _reg(rng), _reg(rng), delta_words * 4)
     elif category == "jal":
         # Forward only, deliberately -- unlike branch, JAL is unconditional.
@@ -222,7 +232,20 @@ def _gen_one_instr(rng, written_offsets, allow_branch_jal=True, pos=None, total=
         # linkage.
         max_span = min(8, total - 1 - pos) or 1
         candidates = [d for d in range(1, max_span + 1) if not _in_any_range(pos + d, loop_ranges)]
-        delta_words = rng.choice(candidates or list(range(1, max_span + 1)))
+        if not candidates:
+            # No safe forward target within reach -- happens when two loop
+            # blocks sit back-to-back and together cover the whole window.
+            # Found by testing: the old fallback here was
+            # `candidates or list(range(1, max_span+1))`, which silently
+            # discarded the exclusion entirely and picked an unsafe target
+            # anyway -- reintroducing the exact JAL-into-a-loop-block
+            # deadlock this function exists to prevent. Emitting a plain
+            # R-type instead is always safe (no address dependency), and
+            # costs nothing real -- this generator has plenty of other
+            # instructions competing for the same slot anyway.
+            op, f3, f7 = rng.choice(R_TYPE)
+            return enc_r(op, f3, f7, _reg(rng), _reg(rng), _reg(rng))
+        delta_words = rng.choice(candidates)
         return enc_j(0x6F, 0, delta_words * 4)
 
 
