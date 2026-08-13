@@ -7,7 +7,7 @@ module data_mem (
     output logic [31:0] read_data
 );
 
-    logic [31:0] ram [0:63];
+    logic [31:0] ram [0:1023];  // 4KB, matches instruction_mem's size
 
     always_ff @(posedge clk) begin
         if (mem_write) begin
