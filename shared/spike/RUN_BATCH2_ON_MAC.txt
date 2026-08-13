@@ -1,20 +1,18 @@
-Batch 2 comparison, ROUND 2 -- run this on the Mac
+Batch 2 comparison, ROUND 3 -- run this on the Mac
 ===================================================
 
-If you already ran round 1 of this batch: please run it again. Round 1
-came back 37%-99.5% on most of the 150/400-sized programs, root-caused
-to a real gen_program.py bug (JAL's return address is base-address-
-dependent between the two simulators -- see batch2/MANIFEST2.txt's
-"ROUND 2" section for the full trace). That's fixed now, and all 8
-programs in batch2/<dir>/ were regenerated and re-validated locally
-before landing here again -- this is fresh content, not the same bytes
-you compared before.
+Round 2 already came back 100.00% on all 8 n50/n150/n400 programs --
+that's confirmed, nothing to redo there. What's new in round 3: two more
+programs, n700_seed700101 and n700_seed700102. n=700 was the one left
+out of every earlier round (round 1: X-propagation; round 2: still
+wouldn't finish, flagged as needing a waveform). That's now root-caused
+and fixed -- a real RTL bug in loop_buffer.sv plus a second, unrelated
+bug in gen_program.py's own safety fallback. Full story in
+batch2/MANIFEST2.txt's "ROUND 3" section.
 
-8 test programs in batch2/<dir>/, sizes n=50/150/400 (see
-batch2/MANIFEST2.txt for the full revision history: two bugs found and
-fixed before round 1 even shipped, one more found and fixed after round
-1's real results came back, and one still-open RTL finding at n=700 that
-deliberately did NOT make it into this batch).
+Same loop as before, just re-run it -- the n50/n150/n400 dirs will just
+re-confirm what round 2 already showed, and the two new n700 dirs are
+where the real new information is:
 
   cd /Volumes/riscv-sim/shared/spike
 
@@ -26,20 +24,18 @@ deliberately did NOT make it into this batch).
     grep ACCURACY "$d/comparison_result.txt"
   done
 
---instructions=5000 (vs. 2100 for batch 1) because these programs are
-bigger -- comfortably covers even the largest (n=400, ~1168 estimated
-real retirements) plus headroom, same idea as before: extra budget just
-means Spike sits in the repeated epilogue a bit longer, which
-compare_accuracy.py already truncates on both sides.
+--instructions=5000 still covers n=700 fine (its real content is
+~1994-2038 estimated retirements, well under that), same idea as always:
+extra budget just means Spike sits in the repeated epilogue a bit
+longer, which compare_accuracy.py already truncates on both sides.
 
 Same note as before: use this folder's spike_log_parser.py /
-sv_log_parser.py / compare_accuracy.py, not the rtl/ copies (those were
-actually removed from the repo, since they'd drifted -- this folder's
-copies are now the only ones that exist).
+sv_log_parser.py / compare_accuracy.py, not the rtl/ copies (removed
+from the repo since they'd drifted -- this folder's copies are the only
+ones that exist).
 
-If anything comes back short of 100%, that's a genuinely new, real
-finding (unlike batch 1's two now-fixed address bugs) -- these programs
-were already validated on the PC side to run to completion cleanly (no
-X-propagation, settles into the epilogue) before being sent over, so a
-mismatch here would be an actual RTL-vs-ISA behavioral difference, not a
-generator artifact.
+n700_seed700101/700102 were only validated locally (clean settle, zero
+X's) before landing here -- this is genuinely the first time loop_buffer's
+fix gets checked against the actual golden model, not just self-checked.
+If these come back at anything less than 100%, that's real, new signal --
+don't assume it's another generator artifact without checking first.
