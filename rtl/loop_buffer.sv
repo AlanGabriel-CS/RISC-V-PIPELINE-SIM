@@ -9,6 +9,7 @@ module loop_buffer #(
     input  logic                  predict_taken,
     input  logic [ADDR_WIDTH-1:0] predict_target,
     input  logic                  flush,
+    input  logic                  stall,            // load-use hazard -- see STATE_RECORDING below
 
     output logic                  loop_active,      // asserted only in STATE_LOOPING
     output logic [31:0]           instruction_out,
@@ -83,6 +84,17 @@ module loop_buffer #(
                     // in place, so the abort is explicit and the tracking
                     // registers get cleared rather than just abandoned.
                     state_d = STATE_INVALID;
+                end else if (stall) begin
+                    // Load-use stall: IF didn't advance this cycle, if_pc
+                    // is re-presenting the same instruction as last cycle,
+                    // already captured then. Not advancing write_ptr here
+                    // is the whole fix -- advancing it unconditionally
+                    // every cycle (the original bug) captures that repeated
+                    // instruction twice, into two consecutive buffer slots,
+                    // and permanently shifts every instruction recorded
+                    // after it by one slot relative to what STATE_LOOPING's
+                    // if_pc-offset-based read_idx expects to find there.
+                    state_d = state_q;
                 end else if (write_ptr_q >= BUFFER_DEPTH) begin
                     state_d = STATE_INVALID;   // body too big for the buffer -- give up
                 end else begin
@@ -134,7 +146,7 @@ module loop_buffer #(
             loop_end_q   <= loop_end_d;
             write_ptr_q  <= write_ptr_d;
 
-            if (state_q == STATE_RECORDING && !flush) begin
+            if (state_q == STATE_RECORDING && !flush && !stall) begin
                 if (write_ptr_q < BUFFER_DEPTH) begin
                     buffer[write_ptr_q[$clog2(BUFFER_DEPTH)-1:0]] <= instruction_in;
                 end
