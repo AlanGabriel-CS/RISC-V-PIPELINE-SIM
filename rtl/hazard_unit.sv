@@ -1,13 +1,13 @@
 // hazard_unit.sv
-// Load-use hazard: the ONE case forwarding can't fix, because a load's data
+// Load-use hazard: the one case forwarding can't fix, because a load's data
 // isn't ready until the end of MEM, one full stage later than every other
 // producer. If the instruction currently in EX (id_ex) is a load, and the
 // instruction currently in ID (the freshly-decoded rs1/rs2) needs that same
-// register, we have to stall for exactly one cycle -- freeze PC + IF/ID,
-// and let the caller insert a bubble into ID/EX instead of letting this
-// instruction proceed. One stall cycle is enough: by the time the consumer
-// reaches EX (two cycles later), the load will be sitting in MEM/WB and
-// ordinary forwarding picks it up from there.
+// register, the pipeline must stall for exactly one cycle -- freezing PC
+// and IF/ID, leaving it to the caller to insert a bubble into ID/EX instead
+// of letting this instruction proceed. One stall cycle is enough: by the
+// time the consumer reaches EX (two cycles later), the load will be sitting
+// in MEM/WB and ordinary forwarding picks it up from there.
 module hazard_unit (
     input  logic [4:0] id_rs1,
     input  logic [4:0] id_rs2,
