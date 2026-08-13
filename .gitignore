@@ -3,3 +3,25 @@ riscv_sim.exe
 riscv_sim
 sim.vvp
 *.hex
+*.elf
+*.log
+commit_log.txt
+comparison_result.txt
+
+# oss-cad-suite toolchain (Windows-only, not part of source)
+oss-cad-suite/
+oss-cad-suite-installer.exe
+
+# compiled testbench sim binaries (rtl/*_sim)
+rtl/*_sim
+
+# macOS SMB share clutter
+.DS_Store
+
+# Python bytecode cache
+__pycache__/
+
+# compiled Spike test binary + trace outputs
+shared/spike/test
+shared/spike/spike_trace.txt
+shared/spike/inst_mem.hex
