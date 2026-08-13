@@ -25,13 +25,6 @@ as of the last run: batch 1 (1 handwritten + 8 random programs, all n<=15) and b
 
 `data_mem` used to cap random programs at ~15 instructions (it was only 256B, and the generator has to fit the whole program plus a load/store scratch region inside it). Bumped it to 4KB to match `instruction_mem`, and added real bounded loops to the generator (counter + body + backward branch, not just the trivial infinite-epilogue branch every program already had) so the loop buffer's replay path actually gets exercised by something other than hand-written directed tests. That's `batch2/` in `shared/spike/` -- covers n=50 through n=700, including loop-heavy programs, all cross-checked against Spike. Full story of what broke getting there is in `batch2/MANIFEST2.txt` and in the debugging notes below.
 
-## Known limitations & test coverage
-
-- **LB/LH/LBU/LHU/SB/SH are excluded from the generator on purpose** -- the RTL ignores funct3 on loads/stores, so these would silently behave like LW/SW instead of exercising anything new. Same story for **BLTU/BGEU**: decoded, but the branch-taken logic never resolves them taken. Both are known RTL gaps, not generator gaps.
-- **No exception/trap/CSR support at all** -- ecall, ebreak, misaligned access, illegal instructions, interrupts. Out of scope so far.
-- **No synthesis, timing, or power numbers.** The loop buffer's whole point is a power-saving trick (freezing the icache address instead of re-fetching), but nothing's actually measured that against real hardware constraints -- it's simulation-only so far.
-- Random testing is still just 2 seeds per size tier, not exhaustive, no coverage metrics or formal verification.
-
 ## Debugging notes (the stuff that actually took time)
 
 Writing some of this down mostly for future-me, because I will 100% forget how any of this worked in six months.
