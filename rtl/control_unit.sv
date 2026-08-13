@@ -1,22 +1,22 @@
 module control_unit (
-    input logic [6:0] opcode,   // 7-bit opcode (instruction bit [6:0])
-    input logic [2:0] funct3,   // 3-bit function field (instruction bits [14:12])
-    input logic [6:0] funct7,   /// 7-bit function field (instruction bits [31:25])
-    output logic reg_write,     // 1 - write to register file, 0 - nothing
-    output logic alu_src,       // 0 - alu operand B is rs2, 1  - alu operand b is imm
-    output logic [3:0] alu_control,   // 4-bit signal telling alu what opp to do
-    output logic mem_to_reg,    // 0 - data to reg from alu,  1 - comes from data mem
-    output logic mem_read,      // 1-  read from data memory, 0 - do nothing
-    output logic mem_write,     // 1-write to data memory, 0 -do nothing
-    output logic branch,        // 1- this is branch instr, 0 - do nothing
-    output logic jump,          // 1 - write pc+4 to rd (JAL or JALR)
-    output logic jalr,          // 1 - pc_next comes from ALU (rs1+imm), not pc+imm (JALR only)
-    output logic lui,           // 1 - write-back comes straight from imm_ext (LUI)
-    output logic auipc          // 1 - ALU operand A must be pc_current, not rs1 (AUIPC)
- );
+    input  logic [6:0] opcode,      // 7-bit opcode (instruction bit [6:0])
+    input  logic [2:0] funct3,      // 3-bit function field (instruction bits [14:12])
+    input  logic [6:0] funct7,      // 7-bit function field (instruction bits [31:25])
+    output logic       reg_write,   // 1 = write to register file, 0 = no-op
+    output logic       alu_src,     // 0 = ALU operand B is rs2, 1 = ALU operand B is the immediate
+    output logic [3:0] alu_control, // 4-bit ALU operation select
+    output logic       mem_to_reg,  // 0 = write-back data comes from the ALU, 1 = from data memory
+    output logic       mem_read,    // 1 = read from data memory, 0 = no-op
+    output logic       mem_write,   // 1 = write to data memory, 0 = no-op
+    output logic       branch,      // 1 = branch instruction, 0 = no-op
+    output logic       jump,        // 1 = write pc+4 to rd (JAL or JALR)
+    output logic       jalr,        // 1 = pc_next comes from ALU (rs1+imm), not pc+imm (JALR only)
+    output logic       lui,         // 1 = write-back comes straight from imm_ext (LUI)
+    output logic       auipc        // 1 = ALU operand A must be pc_current, not rs1 (AUIPC)
+);
 
     always_comb begin
-        // default control signal vals
+        // default control signal values
         reg_write   = 1'b0;
         alu_src     = 1'b0;
         mem_to_reg  = 1'b0;
@@ -27,25 +27,25 @@ module control_unit (
         jalr        = 1'b0;
         lui         = 1'b0;
         auipc       = 1'b0;
-        alu_control = 4'b0000; 
+        alu_control = 4'b0000;
 
         if (opcode == 7'b1100011) $display("Branch opcode detected!");
 
         case (opcode)
-            //r-type instruct (eg. add, sub, and, or)
-            //format op x1, x2, x3 - takes two reg, does math writes back to reg
+            // R-type instructions (add, sub, and, or, etc.)
+            // Format: op rd, rs1, rs2 -- ALU result written back to rd.
             7'b0110011: begin
-                reg_write = 1'b1; // save result to reg
-                alu_src = 1'b0; // operand b comes from rs2
+                reg_write = 1'b1; // write ALU result to the register file
+                alu_src = 1'b0; // operand B comes from rs2
 
-                // look at funct3 and funct7 for math opp
-                case(funct3)
+                // funct3/funct7 select the specific ALU operation
+                case (funct3)
                     3'b000: begin
                         if (funct7 == 7'b0100000)
-                            alu_control = 4'b0001; // sub 
+                            alu_control = 4'b0001; // sub
                         else
                             alu_control = 4'b0000; // add
-                    end 
+                    end
                     3'b111: alu_control = 4'b0010; // and
                     3'b110: alu_control = 4'b0011; // or
                     3'b001: alu_control = 4'b0101; // SLL
@@ -57,11 +57,11 @@ module control_unit (
                 endcase
             end
 
-            // i-type arithmetic instructions (eg. addi, andi, slli, srli, srai, slti, sltiu)
-            // format: op, x1, x2 - takes reg and const
+            // I-type arithmetic instructions (addi, andi, slli, srli, srai, slti, sltiu)
+            // Format: op rd, rs1, imm -- ALU operates on a register and an immediate.
             7'b0010011: begin
-                reg_write = 1'b1; // save result to reg
-                alu_src = 1'b1; // opperand B comes from imm gen, not rs2
+                reg_write = 1'b1; // write ALU result to the register file
+                alu_src = 1'b1; // operand B comes from imm_gen, not rs2
 
                 case (funct3)
                     3'b000:  alu_control = 4'b0000; // addi
@@ -76,29 +76,29 @@ module control_unit (
                 endcase
             end
 
-            //i-type load instr (eg. lw)
+            // I-type load instruction (lw)
             7'b0000011: begin
                 reg_write = 1'b1;
-                alu_src = 1'b1; // use imm to calc memory offset address
-                mem_to_reg = 1'b1; // data being written to reg comes from RAM, not alu
-                mem_read = 1'b1; // tell data mem to open to read gate
-                alu_control = 4'b0000; //alu adds base reg + imm offset
+                alu_src = 1'b1; // immediate forms the memory offset
+                mem_to_reg = 1'b1; // write-back data comes from data memory, not the ALU
+                mem_read = 1'b1; // enable data memory read
+                alu_control = 4'b0000; // ALU computes base register + immediate offset
 
             end
 
-            //s-type store instr (eg sw)
+            // S-type store instruction (sw)
             7'b0100011: begin
-                alu_src = 1'b1; // use imm to calc offset add
-                mem_write = 1'b1; // tell data mem to write gates
-                alu_control = 4'b0000; //alu adds base reg + imm ofset
+                alu_src = 1'b1; // immediate forms the memory offset
+                mem_write = 1'b1; // enable data memory write
+                alu_control = 4'b0000; // ALU computes base register + immediate offset
             end
 
-            // b-type branch instructions (eg. beq, bne, blt, bge)
+            // B-type branch instructions (beq, bne, blt, bge)
             7'b1100011: begin
-                branch   = 1'b1; // Signal that this is a branch instruction
-                alu_src  = 1'b0; // Compare two registers against each other
+                branch   = 1'b1; // signal that this is a branch instruction
+                alu_src  = 1'b0; // compare two registers against each other
 
-                // Decode specific branch condition using funct3
+                // decode branch condition from funct3
                 case (funct3)
                     3'b000: alu_control = 4'b0001; // beq
                     3'b001: alu_control = 4'b0001; // bne
@@ -108,15 +108,15 @@ module control_unit (
                 endcase
             end
 
-            //j-type jump instruction
-            // format: jal x1, offset -- rd = pc+4, pc = pc + imm
+            // J-type jump instruction
+            // Format: jal rd, offset -- rd = pc+4, pc = pc + imm
             7'b1101111: begin
                 jump        = 1'b1;
                 reg_write   = 1'b1;
             end
 
-            // i-type jump-and-link-register (jalr)
-            // format: jalr rd, rs1, imm -- rd = pc+4, pc = (rs1 + imm) & ~1
+            // I-type jump-and-link-register (jalr)
+            // Format: jalr rd, rs1, imm -- rd = pc+4, pc = (rs1 + imm) & ~1
             7'b1100111: begin
                 jump        = 1'b1;
                 jalr        = 1'b1;
@@ -125,15 +125,15 @@ module control_unit (
                 alu_control = 4'b0000; // ALU computes rs1 + imm
             end
 
-            // u-type load upper immediate (lui)
-            // format: lui rd, imm -- rd = imm << 12
+            // U-type load-upper-immediate (lui)
+            // Format: lui rd, imm -- rd = imm << 12
             7'b0110111: begin
                 lui         = 1'b1;
                 reg_write   = 1'b1;
             end
 
-            // u-type add upper immediate to pc (auipc)
-            // format: auipc rd, imm -- rd = pc + (imm << 12)
+            // U-type add-upper-immediate-to-pc (auipc)
+            // Format: auipc rd, imm -- rd = pc + (imm << 12)
             7'b0010111: begin
                 auipc       = 1'b1;
                 reg_write   = 1'b1;
