@@ -1,0 +1,49 @@
+Batch comparison run -- generated on Windows side (v2, after fixing TWO
+gen_program.py bugs -- see below)
+====================================================================
+
+seed  n(requested)  total_instrs  dir
+1     3             35            seed1_n3
+2     5             37            seed2_n5
+3     7             39            seed3_n7
+4     9             41            seed4_n9
+5     11            43            seed5_n11
+6     13            45            seed6_n13
+7     14            46            seed7_n14
+8     15            47            seed8_n15
+
+total_instrs = 31-instr register-clear preamble + n random instructions
+               + 1 infinite-self-branch epilogue
+
+Each dir has:
+  program.elf     <- Spike input
+  program.hex     <- what the SV core consumed
+  commit_log.txt  <- SV core's retirement trace for this exact program
+  run.log         <- SV testbench stdout
+
+IMPORTANT: max n dropped from 23 to 15 since the last batch. Two bugs got
+fixed in gen_program.py's x31 (load/store base register) placement:
+
+  Bug 1 (first fix): x31 was computed 124 bytes too high (auipc's own PC
+  wasn't accounted for), landing outside the SV core's 256-byte data_mem
+  entirely -- every load through x31 read Icarus's 'x' (undefined).
+
+  Bug 2 (this fix): after fixing bug 1, x31 sat exactly at the program's
+  end with no margin, so a store's -32-byte-offset reach could land BACK
+  inside the program's own not-yet-executed instructions. Spike has
+  unified memory, so that's real self-modifying code -- a store's value
+  overwrites a real instruction word, and when Spike later fetches it
+  (now corrupted, often to 0x00000000), it traps as illegal. The SV core
+  never sees this: instruction_mem and data_mem are two separate arrays,
+  so a data store literally cannot affect what the SV core fetches. This
+  is why the previous batch showed random single mismatches (a corrupted
+  instruction near the end of the program) and one near-total collapse
+  (seed6_n18 -- the corruption landed inside a loop body that then
+  diverged every iteration).
+
+  x31 is now placed a full LOAD_STORE_WINDOW (32 bytes) past the end of
+  the program, so the most-negative store can reach is the program's own
+  end -- never before it. This costs data_mem headroom, hence n<=15 now
+  vs n<=23 before.
+
+See RUN_BATCH_ON_MAC.txt (one level up) for what to run against these.
