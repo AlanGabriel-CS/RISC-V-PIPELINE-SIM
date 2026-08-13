@@ -33,7 +33,7 @@
 
 module tb_commit_log();
 
-    localparam MAX_RETIRE = 2000;
+    localparam MAX_RETIRE = 20000;
 
     logic clk, rst_n;
     logic [31:0] pc_out;
@@ -52,7 +52,7 @@ module tb_commit_log();
     // Hard backstop in case something hangs entirely (distinct from the
     // MAX_RETIRE-based natural stop below).
     initial begin
-        #400000;
+        #4000000;
         $display("tb_commit_log: hard timeout reached, forcing exit");
         $finish;
     end
@@ -101,7 +101,7 @@ module tb_commit_log();
         // matches the standard convention a reference model would use, so a
         // load-before-store isn't a false mismatch caused by initialization
         // convention rather than an actual functional difference.
-        for (int j = 0; j < 64; j++) dut.u_data_mem.ram[j] = 32'h00000000;
+        for (int j = 0; j < 1024; j++) dut.u_data_mem.ram[j] = 32'h00000000;
         $readmemh("program.hex", dut.u_instruction_mem.mem);
 
         log_fd = $fopen("commit_log.txt", "w");
