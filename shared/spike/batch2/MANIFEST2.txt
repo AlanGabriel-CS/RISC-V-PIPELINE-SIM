@@ -34,32 +34,80 @@ program's real content finishes well before that, so it spends the rest
 re-retiring the same repeating epilogue instruction. compare_accuracy.py
 already truncates that repeated tail on both sides.
 
-What did NOT make it into this batch, and why (found during PC-side
-validation before anything was sent over -- worth knowing about):
+Revision history on this batch (round 1 was sent, actually compared
+against Spike, and came back with real problems -- this section is the
+honest trail, not just the final state):
 
-- Two real bugs in gen_program.py's random control-flow generation, found
-  by running candidate programs through Icarus locally and checking they
-  actually settle into the epilogue instead of hanging:
-    1. JAL is unconditional -- a randomly-chosen backward JAL with nothing
-       along the way able to conditionally escape formed a guaranteed,
-       permanent 2-instruction deadlock the moment it was reached.
-    2. A backward conditional branch whose comparison happened to keep
-       evaluating "taken" for many consecutive visits (pure bad luck with
-       which registers got compared, not a logic bug) formed the same
-       kind of accidental infinite loop. This got common enough at
-       n=400 that most naive attempts hung.
+ROUND 1 -- two bugs found in gen_program.py before anything was sent
+(caught locally: candidate programs run through Icarus and checked for
+whether they actually settle into the epilogue instead of hanging):
+  1. JAL is unconditional -- a randomly-chosen backward JAL with nothing
+     along the way able to conditionally escape formed a guaranteed,
+     permanent 2-instruction deadlock the moment it was reached.
+  2. A backward conditional branch whose comparison happened to keep
+     evaluating "taken" for many consecutive visits (pure bad luck with
+     which registers got compared, not a logic bug) formed the same kind
+     of accidental infinite loop -- common enough at n=400 that most
+     naive attempts hung.
   Fix: JAL and top-level branches are now forward-only. Backward branches
   are still real and tested -- every random_loop_block's own bne is a
-  genuine backward branch, just a provably-terminating one (decrementing
-  counter, body instructions can't touch it).
+  genuine backward branch, provably terminating by construction
+  (decrementing counter, body instructions can't touch it).
+  n=700 was attempted in this round too: every try (12/12) ended in PC
+  going to 'x' (X-propagation, not a hang). Left out of round 1, flagged
+  as unexplained.
 
-- n=700 (and likely other sizes with many loop blocks packed in): every
-  attempt (12/12) ended in PC going to 'x' -- not a hang, actual
-  X-propagation -- well before the program's own expected retirement
-  count. Not yet root-caused. Prime suspect given what's different at
-  that density: many backward-taken predictions (one per loop block, and
-  n=700 generates on the order of 15-20 of them) sharing branch_predictor's
-  64-entry, direct-mapped BTB, feeding loop_buffer's single-loop-context
-  FSM. Flagged as follow-up work, not fixed here -- didn't want to rush a
-  change to loop_buffer/branch_predictor interaction without room to
-  actually verify it.
+ROUND 2 -- round 1's 8 programs were actually run against Spike on the
+Mac. Results: n50 x2 = 100%, but n150/n400 ranged 37%-99.5%, mostly bad.
+Root cause, found by tracing the first divergence in each failing case
+back through the raw commit logs on both sides:
+  JAL's return address (pc+4) is base-address-dependent -- the SV core
+  boots from PC=0, Spike loads the same bytes at 0x80000000, so the SAME
+  JAL produces a small value on one side and a ~0x8000xxxx value on the
+  other. That's fine for each simulator's own execution, but once a LATER
+  random instruction picked that register as an operand to anything
+  sign-sensitive (SRA, SLT, BLT, BGE), the two simulators legitimately
+  computed different results, or took different branch directions
+  entirely -- not an RTL bug, a comparison-methodology hazard from the
+  base-address split. Confirmed directly: n150_seed150003's first
+  mismatch was `srai x2,x5,1` where x5 held a JAL return address --
+  Spike's x5=0x8000008c (sign bit set, arithmetic shift sign-extends),
+  SV's x5=0x8c (sign bit clear, doesn't) -- both computed *correctly*
+  from their own x5.
+  Fix: JAL's rd is now forced to x0. This generator only ever needed JAL
+  for its squash-on-taken control-flow behavior, never real call/return
+  linkage, so discarding the return address (same convention as RISC-V's
+  "j" pseudo-op) costs nothing and removes the hazard at its source.
+
+  Also root-caused n=700's X-propagation while in there (the "BTB
+  aliasing/loop_buffer density" guess from round 1 was wrong -- didn't
+  even need to touch loop_buffer): `data_offset` (how far past the
+  program's own end x31's data region sits) grows with n, and at n=700 it
+  reached 2836 -- past what a single addi's signed 12-bit immediate
+  (+-2047) can hold. Encoding it directly silently truncated and
+  sign-flipped it (2836 -> -1260), landing x31 at a wildly wrong address;
+  every load/store through it then indexed data_mem out of bounds, which
+  Icarus correctly returns 'x' for. Fix: the standard RISC-V auipc+addi
+  hi20/lo12 split (same technique real toolchains use for
+  %pcrel_hi/%pcrel_lo) -- auipc's own 20-bit immediate now carries the
+  bulk of the offset, addi only the remainder, which by construction
+  always fits in +-2047 regardless of program size.
+
+All 8 programs in this dir were regenerated after both round-2 fixes and
+re-validated locally (settles cleanly into the epilogue, zero X's) before
+being sent back to the Mac for a second real comparison.
+
+STILL OPEN, found while chasing n=700 a second time after the auipc/addi
+fix (X-propagation was gone, but it still didn't finish in 20000
+retirements): one specific loop_buffer replay looked consistently
+one-slot-behind where it should be, starting exactly on the iteration a
+loop's trip counter hits zero (the exit iteration) -- e.g. the decrement
+instruction's own commit line showed a register write that belongs to
+the *previous* body instruction instead. Strong suspicion, not proven:
+an interaction between STATE_LOOPING's replay and the misprediction
+flush that should fire when the trained-taken BTB entry predicts one more
+iteration than the loop actually has left. n=700 is deliberately left
+out of this batch because of this -- it's a real, pre-existing RTL
+question in loop_buffer.sv itself (not touched this session, not a
+gen_program.py issue), and diagnosing it properly needs a waveform, not
+more log-reading. Follow-up work, not fixed here.
