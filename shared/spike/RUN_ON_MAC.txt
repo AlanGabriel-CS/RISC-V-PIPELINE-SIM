@@ -27,4 +27,12 @@ What to do on the Mac:
 
 4. Ping me once comparison_result.txt lands -- expecting close to 100% now.
 
-Note: use the scripts in THIS folder (shared/spike/*.py), not the rtl/ copies.
+Note: use the scripts in THIS folder (shared/spike/*.py), not the rtl/
+copies -- those were actually removed now, since they'd drifted from
+these; this folder's copies are the only ones that exist.
+
+program.hex/program.elf/commit_log.txt in this folder were just
+regenerated fresh (still seed=100, n=15) after bumping data_mem to 4KB --
+see RUN_BATCH2_ON_MAC.txt for the new, much wider size range that unlocks
+(n up into the hundreds instead of capping at 15), plus two real
+generator bugs found and fixed while building that batch.
