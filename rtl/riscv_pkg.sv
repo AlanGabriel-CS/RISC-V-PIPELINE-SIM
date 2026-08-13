@@ -4,16 +4,16 @@
 // ctrl_t and embedding that -- keeps this to plain packed logic vectors only,
 // which is the safest subset for portability across SystemVerilog tools.
 package riscv_pkg;
- 
+
     typedef struct packed {
-        logic        valid;         
+        logic        valid;         // 0 = bubble (squashed by flush)
         logic [31:0] pc;
         logic [31:0] pc_plus4;
         logic [31:0] instr;
         logic        pred_taken;
         logic [31:0] pred_target;
     } if_id_t;
- 
+
     typedef struct packed {
         logic        valid;
         logic [31:0] pc;
@@ -40,9 +40,10 @@ package riscv_pkg;
         logic        lui;
         logic        auipc;
     } id_ex_t;
- 
+
     typedef struct packed {
         logic        valid;
+        logic [31:0] pc;
         logic [31:0] pc_plus4;
         logic [31:0] alu_result;
         logic [31:0] store_data;
@@ -55,9 +56,10 @@ package riscv_pkg;
         logic        jump;
         logic        lui;
     } ex_mem_t;
- 
+
     typedef struct packed {
         logic        valid;
+        logic [31:0] pc;
         logic [31:0] pc_plus4;
         logic [31:0] alu_result;
         logic [31:0] mem_read_data;
@@ -68,5 +70,5 @@ package riscv_pkg;
         logic        jump;
         logic        lui;
     } mem_wb_t;
- 
+
 endpackage
