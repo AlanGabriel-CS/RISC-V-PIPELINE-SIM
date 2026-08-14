@@ -1,50 +1,172 @@
-# RISC-V-PIPELINE-SIM
+RV32I Pipelined Core with Golden-Model (Spike) Verification
+I built this to get real hands-on practice with pipeline hazards and simulator-vs-simulator verification, not just write RTL that passes my own testbenches and call it done. It's a 5-stage RV32I core -- hazard detection, forwarding, tagged branch prediction, and a loop buffer for cheap "icache gating" power savings -- cross-checked against Spike, the reference RISC-V ISA simulator, instruction-by-instruction. Started life as a single-cycle simulator and grew from there.
 
-A 5-stage pipelined RV32I core written in SystemVerilog, simulated with Icarus Verilog and cross-checked against Spike (the official RISC-V ISA simulator) for correctness. Started out as a simple cycle-accurate single-cycle simulator and grew into a proper pipeline with hazard detection, forwarding, branch prediction, and a loop buffer for cheap "icache gating" power savings.
+What I'm proudest of: at larger random-program sizes, one specific loop kept running forever with no error, no X's, nothing the commit log alone could explain. Wrote a scratch testbench that dumps the loop buffer's internal state every cycle, watched a load-use stall get silently mis-recorded as a brand-new instruction, root-caused it precisely, fixed it, and then wrote `tb_loop_buffer_stall.sv` specifically so it can never quietly come back. More on that below.
 
-## What's actually in here
+Overview
+The core (`riscv_core`) is a classic 5-stage pipeline -- IF, ID, EX, MEM, WB -- implementing the RV32I base integer ISA (no M/F/D extensions). A direct-mapped, tagged branch predictor drives fetch, a loop buffer sits in front of instruction memory to replay tight backward loops without re-fetching, and a hazard/forward unit pair handles the one hazard forwarding can't fix (load-use) plus everything it can.
 
-- 5-stage pipeline: IF -> ID -> EX -> MEM -> WB
-- Load-use hazard detection (1-cycle stall, see `hazard_unit.sv`)
-- Full forwarding for EX operands (EX/MEM and MEM/WB, priority given to the closer one)
-- Direct-mapped branch predictor, 64 entries, tagged BTB + 2-bit saturating counters
-- A loop buffer that recognizes tight backward branches and replays instructions out of a small buffer instead of re-fetching, and freezes ("gates") the icache address while it does
-- RV32I base integer instruction set (no M/F/D extensions)
-- 256-byte data memory, 4KB instruction memory
+Architecture
+IF: pc.sv --if_pc--> loop_buffer --> instruction_mem
+                          |
+                          v
+                 branch_predictor (64-entry tagged BTB, 2-bit BHT)
+                          |
+                          v
+                     if_id_r (pipeline reg)
+                          |
+ID: control_unit + reg_file + imm_gen
+    hazard_unit --stall--> freezes PC/IF-ID, bubbles ID/EX (load-use hazard)
+                          |
+                          v
+                     id_ex_r
+                          |
+EX: alu.sv (forward_unit selects EX/MEM or MEM/WB operand)
+    branch resolution --> mispredict flush back to IF
+                          |
+                          v
+                     ex_mem_r
+                          |
+MEM: data_mem.sv
+                          |
+                          v
+                     mem_wb_r
+                          |
+WB: register file writeback (+ same-cycle read/write bypass in reg_file.sv)
 
-## How I verify this thing
+Prettier version (renders on GitHub)
+```mermaid
+flowchart LR
+    PC[pc.sv] --> LB[loop_buffer]
+    LB --> IM[instruction_mem]
+    LB --> BP[branch_predictor<br/>64-entry tagged BTB]
+    BP -->|predict taken/target| PC
+    IM --> IFID[if_id_r]
+    IFID --> ID[control_unit / reg_file / imm_gen]
+    HU[hazard_unit] -.stall.-> PC
+    HU -.stall/bubble.-> IFID
+    ID --> IDEX[id_ex_r]
+    IDEX --> EX[alu.sv]
+    FU[forward_unit] -.forward.-> EX
+    EX -.mispredict flush.-> PC
+    EX --> EXMEM[ex_mem_r]
+    EXMEM --> MEM[data_mem.sv]
+    MEM --> MEMWB[mem_wb_r]
+    MEMWB --> WB[reg_file writeback]
+    WB -.forward.-> FU
+```
 
-I don't trust my own testbenches to catch everything (learned that the hard way, see below), so the real correctness check is comparing this core's retirement trace against Spike, the reference RISC-V ISA simulator.
+**Hazards.** `hazard_unit.sv` catches the one case forwarding can't: a load's result isn't ready until the end of MEM, one stage later than every other producer, so if the instruction in EX is a load and the instruction in ID needs that register, the pipeline stalls exactly one cycle (freeze PC + IF/ID, bubble into ID/EX). Everything else -- EX/MEM and MEM/WB producers -- gets forwarded directly into the ALU operand mux, priority given to the closer one.
 
-The repo is split across my PC and Mac, shared over an SMB folder, because I never got Spike building cleanly on Windows and honestly didn't feel like fighting it:
+**Branch prediction.** Direct-mapped, 64 entries, 2-bit saturating counters. The original version had no tag field, and that was scarier than it sounds: two branch addresses hashing to the same index meant a trained "taken, jump to X" entry from one branch could get served to a completely unrelated instruction that happened to alias the same slot. Since `predict_taken` steers fetch in IF regardless of whether the current instruction is even a branch, this wasn't just a misprediction (which flushes for free) -- it could redirect fetch off a plain ALU instruction with nothing there to ever catch it, so wrong-path code just... executes for real. Fixed by adding a tag field to `branch_predictor.sv`; a false index hit now safely falls back to not-taken instead of a random jump. Regression-guarded by `tb_btb_tag_fix.sv`.
 
-- **PC** compiles and runs the SV core in Icarus Verilog, produces `commit_log.txt` (the retirement trace) plus the program hex/elf
-- **Mac** runs Spike against the same elf, then diffs the two traces with `compare_accuracy.py`
+**Loop buffer.** Recognizes a backward-taken branch once the predictor's trained it, records the loop body into a small buffer on the pass where it's first seen, then replays instructions straight out of that buffer on every subsequent pass instead of re-fetching -- freezing ("gating") the icache address the whole time it does, which is the actual power-saving mechanism. Two real bugs here, both regression-guarded now:
+- *Wraparound* -- the read index (`if_pc - loop_start`, shifted to a word offset) needs an explicit range check on `if_pc` itself, not just index math, or a backward exit could produce a false "valid" hit off unsigned wraparound; comparing against `write_ptr` also needs zero-extension or it silently breaks for a loop that fills the buffer exactly. `tb_loop_buffer_edgecases.sv` exists because I didn't trust myself to get this right the first time. I did not, in fact, get it right the first time.
+- *The stall bug (the one from the top of this README)* -- RECORDING advanced its write pointer and captured the fetched instruction on *every* clock cycle, with no check for whether the pipeline had actually stalled that cycle. A load-use hazard inside a loop body freezes the fetch PC for one extra cycle (the pipeline's own correct stall, nothing wrong with that part on its own) -- but during RECORDING, that repeated cycle got captured as if it were a new instruction, shifting everything recorded after it by one buffer slot. By the loop's exit iteration, replay was quietly handing back the *decrement* instruction instead of the branch, so the branch never got re-evaluated, the counter blew straight through zero, and the loop never stopped. Not visible from the commit log alone -- found it with a scratch testbench dumping `loop_buffer`'s internal state every cycle, watched the write pointer hold steady during the stall instead of advancing. Fixed by giving `loop_buffer` a `stall` input and having RECORDING skip the write/advance on a stalled cycle. `tb_loop_buffer_stall.sv` is the regression test, and I checked it actually fails against the pre-fix RTL (loop counter landed on 17 instead of 5) before trusting that it passes for the right reason with the fix.
 
-as of the last run: batch 1 (1 handwritten + 8 random programs, all n<=15) and batch 2 (10 random programs, n=50 up to n=700 -- see below) all match Spike at 100%.
+Verification Environment
+PC (Windows, Icarus Verilog)                          Mac (Spike)
+-----------------------------                         -----------
+gen_program.py --> program.hex / program.elf
+        |
+        v
+riscv_core + tb_commit_log.sv
+        |
+        v
+commit_log.txt (SV retirement trace)
+        |
+        +-------------- SMB share (shared/spike/) -------------->
+                                                          spike --log-commits program.elf
+                                                                  |
+                                                                  v
+                                                          spike_trace.log
+                                                                  |
+                                                    spike_log_parser.py + sv_log_parser.py
+                                                                  |
+                                                                  v
+                                                    compare_accuracy.py -- per-instruction diff
+                                                                  |
+                                                                  v
+                                                          comparison_result.txt
 
-`data_mem` used to cap random programs at ~15 instructions (it was only 256B, and the generator has to fit the whole program plus a load/store scratch region inside it). Bumped it to 4KB to match `instruction_mem`, and added real bounded loops to the generator (counter + body + backward branch, not just the trivial infinite-epilogue branch every program already had) so the loop buffer's replay path actually gets exercised by something other than hand-written directed tests. That's `batch2/` in `shared/spike/` -- covers n=50 through n=700, including loop-heavy programs, all cross-checked against Spike. Full story of what broke getting there is in `batch2/MANIFEST2.txt` and in the debugging notes below.
+Prettier version (renders on GitHub)
+```mermaid
+flowchart TB
+    subgraph PC["PC (Windows, Icarus Verilog)"]
+        GEN[gen_program.py] --> HEX["program.hex / program.elf"]
+        HEX --> SIM["riscv_core + tb_commit_log.sv"]
+        SIM --> CL["commit_log.txt"]
+    end
+    subgraph MAC["Mac (Spike)"]
+        SPK["spike --log-commits"] --> ST["spike_trace.log"]
+        ST --> PARSE["spike_log_parser.py / sv_log_parser.py"]
+        CL -.SMB share.-> PARSE
+        PARSE --> CMP["compare_accuracy.py"]
+        CMP --> RES["comparison_result.txt"]
+    end
+```
 
-## Debugging notes (the stuff that actually took time)
+**Why a golden model at all.** I don't trust my own testbenches to catch everything -- learned that the hard way -- so the real correctness check is a per-instruction diff of this core's retirement trace against Spike's. The repo is split across a PC and a Mac, shared over an SMB folder, because Spike never built cleanly on Windows and I didn't feel like fighting it: the PC compiles and runs the SV core in Icarus Verilog and produces `commit_log.txt` plus the program hex/elf; the Mac runs Spike against the same elf and diffs the two traces.
 
-Writing some of this down mostly for future-me, because I will 100% forget how any of this worked in six months.
+**Test generation (`gen_program.py`).** Generates random RV32I programs restricted to the subset the core actually implements correctly, plus real bounded loops (init counter, random body, decrement, backward branch) interleaved into the stream so the loop buffer's replay path gets exercised by something other than hand-written directed tests. `data_mem` used to cap this at ~15 instructions (only 256B, and the generator has to fit the whole program plus a load/store scratch region inside it); bumped it to 4KB to match `instruction_mem`, which unlocked programs up into the hundreds of instructions. That size increase surfaced real bugs the small scale never hit:
+- **x31 base-register math** -- the load/store base register is computed relative to the program's own address (`auipc` + `addi`). First version placed it 124 bytes too high (forgot `auipc`'s own PC needs accounting for), so every load through it read Icarus's undefined `x`. Fixed that, then hit a second, sneakier one: with no margin left, a negative store offset could land back inside the program's own not-yet-executed instructions -- genuine self-modifying code under Spike's unified memory model, invisible on the SV side since `instruction_mem` and `data_mem` are separate arrays there. Gave x31 a full 32-byte window past the end of the program so the most-negative store offset can never reach back into it.
+- **A 12-bit immediate doesn't care how big your program is** -- that same x31 setup used a single `addi` to carry the whole offset, and at n=700 the offset (2836) exceeded what a signed 12-bit immediate (+-2047) can hold. Encoding it anyway silently truncated and sign-flipped it, landing x31 on a wildly wrong address and pushing every load/store through it out of bounds -- which Icarus correctly returns `x` for. Fixed with the standard `auipc`+`addi` hi20/lo12 split real toolchains use for `%pcrel_hi`/`%pcrel_lo` relocations, so it holds for any program size.
+- **JAL's return address is base-address-dependent** -- the SV core boots from PC=0, Spike loads the same bytes at 0x80000000, so the same `jal` computes a small value on one side and a `~0x8000xxxx` value on the other. Fine for each simulator's own execution, until a later random instruction used that register as an operand to anything sign-sensitive (SRA, SLT, BLT, BGE) and the two simulators legitimately computed different answers. Traced a real failure to `srai x2,x5,1` where x5 held a JAL return address: Spike's had the sign bit set, the SV core's didn't -- neither side was wrong, they just didn't have the same x5. Fixed by forcing JAL's `rd` to x0; the generator only ever needed JAL's squash-on-taken behavior, never real call/return linkage.
+- **Two ways to write a permanent deadlock into a random generator** -- JAL is unconditional, so a randomly-chosen backward JAL with nothing able to conditionally escape is a guaranteed deadlock the instant it's reached. A backward *conditional* branch doesn't even need a bug to do the same thing -- if the registers it compares don't happen to get touched again before it's next reached, it can evaluate "taken" forever, purely by bad luck. Fixed both by making JAL and top-level branches forward-only; backward branches didn't disappear, every generated loop's own decrement-guarded branch is still a real one, just provably terminating by construction.
+- **My own "safe" fallback wasn't** -- the exclusion logic that stops a random JAL/branch from targeting inside a loop block had a fallback for when nothing in range was safe, and that fallback silently discarded the exclusion and picked an unsafe target anyway -- reintroducing the exact deadlock it existed to prevent, whenever two loop blocks happened to sit back-to-back. Lesson: a fallback that avoids crashing isn't the same thing as a fallback that's actually safe. Fixed by emitting a harmless instruction instead when there's nowhere safe to jump.
 
-**BTB aliasing was scarier than it sounds.** The original branch predictor was just a direct-mapped table indexed by PC bits, no tag. Worked fine right up until two branch addresses hashed to the same index -- then a trained "taken, jump to X" entry from one branch would get served to a completely unrelated instruction that happened to alias the same table slot. Since `predict_taken` steers fetch in IF regardless of whether the current instruction is even a branch, this wasn't just a misprediction (which gets flushed for free) -- it could redirect fetch off a plain ALU instruction with nothing there to ever flush it, so wrong-path code just... executes for real. Added a tag field to close it (`branch_predictor.sv`), a false index hit now just falls back to not-taken instead of a random jump.
+**Regression testbenches (`rtl/tb_*.sv`).** One directed testbench per feature or bug, each checking a specific thing rather than re-deriving the whole pipeline:
+- `tb_riscv_core.sv` -- full pipeline sanity: forwarding chains, load-use stall, branch/JAL/JALR misprediction + squash, LUI/AUIPC
+- `tb_slti_sltiu.sv` -- signed vs. unsigned set-less-than, forwarded from both EX/MEM and MEM/WB
+- `tb_btb_tag_fix.sv` -- confirms an aliased BTB index no longer produces a wrong-target prediction
+- `tb_loop_buffer.sv` -- loop buffer reaches PLAYBACK and INVALID, captures the right bytes
+- `tb_loop_buffer_edgecases.sv` -- buffer-full and backward-exit wraparound cases
+- `tb_loop_buffer_stall.sv` -- the load-use-stall-during-RECORDING regression described above
+- `tb_icache_gating.sv` -- gated address never changes mid-freeze, gating tracks `loop_active` exactly
+- `tb_commit_log.sv` -- not a pass/fail check, the actual trace tap used for Spike comparison
 
-**The x31 base register bug in `gen_program.py`.** My random program generator uses x31 as a base register for loads/stores, computed relative to the program's own address. First version placed it 124 bytes too high because I forgot `auipc`'s own PC needs to be accounted for in the offset math -- so x31 ended up pointing completely outside the 256-byte data_mem, and every load through it read back Icarus's undefined `x`. Fixed that, then immediately ran into a second, sneakier bug: with x31 now sitting right at the end of the program with no margin, a store with a negative offset could land back inside the program's own not-yet-executed instructions. Spike has unified memory, so that's genuine self-modifying code -- a store corrupts a real instruction word, and when Spike later fetches it, it traps. My SV core never saw any of this because `instruction_mem` and `data_mem` are two completely separate arrays there, so the bug was totally invisible on my side and only ever showed up as Spike mismatches. Took embarrassingly long to figure out why "random" single-instruction mismatches kept popping up near the end of programs. Fixed it by giving x31 a full 32-byte window past the end of the program, so the most-negative store offset can never reach backwards into it.
+Results so far: batch 1 (1 handwritten + 8 random programs, all n<=15) and batch 2 (10 random programs, n=50 through n=700, including loop-heavy ones) all match Spike at 100%. Full trail of what broke getting batch 2 there is in `shared/spike/batch2/MANIFEST2.txt`.
 
-**Loop buffer wraparound.** the read index into the loop buffer is computed as `if_pc - loop_start`, then shifted down to a word offset. Doing a plain arithmetic compare against `write_ptr` without zero-extending first would silently break for a loop that fills the buffer exactly (comparing against a truncated width). Also needed an explicit range check on `if_pc` itself, not just index math, or a backward exit out of the loop could produce a false "valid" hit off unsigned wraparound. `tb_loop_buffer_edgecases.sv` exists specifically because I did not trust myself to get this right on the first try. I did not, in fact, get it right on the first try.
+Repository Structure
+rtl/
+  riscv_core.sv               top-level pipeline integration
+  pc.sv                        program counter
+  instruction_mem.sv           4KB instruction memory
+  instruction_mem_bram.sv      alternate BRAM-style i-mem (unused, exploratory)
+  data_mem.sv                  4KB data memory
+  control_unit.sv               opcode decode -> control signals
+  reg_file.sv                   32x32 register file, same-cycle write/read bypass
+  imm_gen.sv                    immediate extraction / sign-extend
+  alu.sv                        ALU ops
+  forward_unit.sv               EX/MEM, MEM/WB forwarding
+  hazard_unit.sv                load-use stall detection
+  branch_predictor.sv           64-entry tagged BTB + 2-bit BHT
+  loop_buffer.sv                tight-loop instruction replay + icache gating
+  riscv_pkg.sv                  shared pipeline-register typedefs
+  tb_*.sv                       directed regression testbenches (see above)
 
-**Toolchain versions do not travel well.** oss-cad-suite's Icarus install is pinned to whatever version I set up on the PC (12.0). Found out the hard way that rebuilding against a newer local Icarus (13.0) throws fatal "sorry: constant selects" errors on some of the `always_comb` blocks -- a real Icarus limitation with constant part-selects inside procedural blocks (`imm_gen.sv` and `alu.sv` both hit it), not a design bug, but a good reminder to keep prebuilt sim binaries around instead of assuming "eh, it'll just recompile fine anywhere."
+shared/spike/                  SMB share with the Mac -- see Verification Environment
+  gen_program.py                random RV32I test-program generator
+  run_spike.py                  drives Spike against program.elf
+  spike_log_parser.py           parses Spike --log-commits output
+  sv_log_parser.py              parses commit_log.txt
+  compare_accuracy.py           diffs the two retirement traces
+  boot.s, link.ld, hello.c, main.c   bring-up program for Spike
+  batch/, batch2/                generated test-program batches + comparison results
+  RUN_ON_MAC.txt, RUN_BATCH_ON_MAC.txt, RUN_BATCH2_ON_MAC.txt   cross-machine run notes
 
-**Two ways to accidentally write a permanent deadlock into a random program generator.** Once I widened `gen_program.py` to generate bigger programs, plain bad luck started showing up as actual hangs instead of staying theoretical. First one: JAL is unconditional, and a randomly-chosen backward JAL with nothing along the way able to conditionally escape is a guaranteed, permanent deadlock the instant it's reached -- found this at n=150 where a stray `jal x2,-4` happened to jump straight back onto a loop's own exit branch. Second, sneakier one: a backward *conditional* branch doesn't need a bug to do the same thing, just bad luck -- if the two registers it compares don't happen to get touched again before the branch is next reached, it can keep evaluating "taken" forever, and at n=400 that stopped being rare enough to ignore. Fixed both by making JAL and top-level branches forward-only. Backward branches didn't disappear -- every loop the generator builds now has its own bounded, provably-terminating backward branch (decrementing counter, body can't touch it), which is a real backward branch, just not a random one.
+Build & Run
+Requires Icarus Verilog 12.x (oss-cad-suite works well) on the RTL side, and Spike (riscv-isa-sim) on a Unix-like machine for cross-checking -- it doesn't build cleanly on Windows.
 
-**JAL's return address is base-address-dependent, and that broke the comparison, not the RTL.** The SV core boots from PC=0; Spike loads the exact same bytes at 0x80000000. So the same `jal` instruction computes a small return address on one side and a `~0x8000xxxx` one on the other -- totally correct for each simulator's own execution, right up until a *later* random instruction picks that register as an operand to anything sign-sensitive (SRA, SLT, BLT, BGE), and then the two simulators legitimately compute different answers, since they're not looking at the same value anymore. This is the bug that made batch 2's first real Spike run come back at 37%-99.5% instead of 100% -- traced it to `srai x2,x5,1` where x5 held a JAL return address: Spike's x5 had the sign bit set (arithmetic shift sign-extends), the SV core's didn't (it doesn't). Neither side was wrong. Fixed by forcing JAL's `rd` to x0 -- the generator only ever needed JAL for its squash-on-taken control-flow behavior, never real call/return linkage, so throwing away the return address costs nothing and removes the hazard at the source.
+# Compile + run a directed testbench (from rtl/)
+iverilog -g2012 -o sim.vvp \
+  riscv_pkg.sv alu.sv pc.sv imm_gen.sv control_unit.sv reg_file.sv \
+  instruction_mem.sv data_mem.sv forward_unit.sv hazard_unit.sv \
+  branch_predictor.sv loop_buffer.sv riscv_core.sv tb_riscv_core.sv
+vvp sim.vvp
 
-**A 12-bit immediate doesn't care how big your program is.** `x31` (the load/store base register) is set up with `auipc` + a single `addi` carrying the offset from the program's own end to a safe data region. That offset grows with program size, and at n=700 it hit 2836 -- past what a signed 12-bit `addi` immediate (+-2047) can hold. Encoding it anyway silently truncated and sign-flipped it (2836 became -1260), so `x31` landed on a wildly wrong address and every load/store through it indexed `data_mem` out of bounds, which Icarus correctly returns `x` for. Took a while to even notice this was the cause, since "X-propagation somewhere in a 700-instruction program" doesn't point at anything by itself. Fixed it with the standard `auipc`+`addi` hi20/lo12 split real toolchains use for `%pcrel_hi`/`%pcrel_lo` relocations -- `auipc`'s own 20-bit immediate carries the bulk of the offset now, `addi` only ever has to carry the remainder, which always fits by construction.
-
-**The loop buffer bug that actually needed a waveform.** After fixing the immediate overflow above, n=700 still wouldn't finish -- no more X's, just ran forever. Turned out `loop_buffer`'s RECORDING state was advancing its write pointer and capturing the fetched instruction on *every* clock cycle, with no check for whether the pipeline had actually stalled that cycle. A load-use hazard inside a loop body freezes the fetch PC for one extra cycle (the pipeline's own correct 1-cycle stall, nothing wrong with that part) -- but during RECORDING, that repeated cycle got captured as if it were a brand new instruction, shifting everything recorded after it by one buffer slot. By the loop's exit iteration, replay was quietly handing back the *decrement* instruction instead of the branch, so the branch never actually got re-evaluated, the counter blew straight through zero, and the loop just never stopped. Couldn't see this from the commit log alone -- wrote a scratch testbench that dumps `loop_buffer`'s internal state every cycle and watched the write pointer hold steady during the stall instead of advancing. Fixed by giving `loop_buffer` a `stall` input and having RECORDING skip the write/advance on a stalled cycle. `tb_loop_buffer_stall.sv` is the regression test -- checked it actually fails against the old RTL first (loop counter landed on 17 instead of 5) before trusting that it passes for the right reason with the fix.
-
-**My own "safe" fallback wasn't.** While fixing the bug above, found a second one I'd introduced myself: the exclusion logic that stops a random JAL/branch from targeting inside a loop block had a fallback -- `candidates or list(range(1, max_span+1))` -- for when nothing in range was safe. Turns out when two loop blocks land back-to-back and together cover the whole forward window, that's exactly what happens, and the fallback just silently threw the exclusion away and picked an unsafe target anyway, putting back the exact deadlock it existed to prevent. Lesson: a fallback that exists to avoid crashing isn't the same thing as a fallback that's actually safe -- check what it does under the condition that made the primary path fail, not just that it does *something*. Fixed by emitting a harmless R-type instruction instead when there's nowhere safe to jump.
-
-**And a dumb one I should probably just remove:** there's still a stray `$display("Branch opcode detected!")` sitting in `control_unit.sv` from when I was bringing up branch decode and needed to sanity-check it was actually firing. Harmless, just clutters up simulation stdout, and I keep forgetting to delete it.
+# Golden-model comparison (from shared/spike/)
+python3 gen_program.py <seed> <n>          # -> program.hex, program.elf
+# compile/run tb_commit_log.sv against program.hex -> commit_log.txt (PC side)
+spike -l --log-commits --isa=rv32i --instructions=5000 program.elf 2> spike_trace.log   # Mac side
+python3 compare_accuracy.py spike_trace.log commit_log.txt
