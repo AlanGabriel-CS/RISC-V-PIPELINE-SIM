@@ -1,6 +1,7 @@
 build/
 riscv_sim.exe
 riscv_sim
+pipeline_sim
 sim.vvp
 *.hex
 *.elf
@@ -25,3 +26,7 @@ __pycache__/
 shared/spike/test
 shared/spike/spike_trace.txt
 shared/spike/inst_mem.hex
+
+# local tool config (not project source, machine/tool-specific)
+.claude/
+.vscode/
